@@ -1,7 +1,7 @@
 package = "Cord"
 version = "dev-1"
 source = {
-   url = "*** please add URL for source tarball, zip or repository here ***"
+   url = "https://github.com/buttercoffee07/cord.lua"
 }
 description = {
    homepage = "*** please enter a project homepage ***",
