@@ -8,12 +8,113 @@ local MAJOR_ROUTE_KEYS = {
 	webhooks = true,
 }
 
+local FALLBACK_RETRY_AFTER = 1
+local DEFAULT_429_RETRIES = 5
+
 local function isId(value)
 	if type(value) ~= "string" then
 		return false
 	end
 
 	return value:match("^%d+$") ~= nil
+end
+
+local function sleepSeconds(seconds)
+	if type(seconds) ~= "number" or seconds <= 0 then
+		return
+	end
+
+	local untilAt = os.clock() + seconds
+	while os.clock() < untilAt do
+	end
+end
+
+local function toNumber(value)
+	if type(value) == "number" then
+		if value >= 0 then
+			return value
+		end
+		return nil
+	end
+
+	if type(value) == "string" then
+		local num = tonumber(value)
+		if num and num >= 0 then
+			return num
+		end
+	end
+
+	return nil
+end
+
+local function readRetryAfterHeader(headers)
+	if type(headers) ~= "table" then
+		return nil
+	end
+
+	local direct = headers["retry-after"] or headers["Retry-After"]
+	if direct ~= nil then
+		return direct
+	end
+
+	for name, value in pairs(headers) do
+		if type(name) == "string" and name:lower() == "retry-after" then
+			return value
+		end
+	end
+
+	return nil
+end
+
+local function readRetryAfter(payload)
+	if type(payload) ~= "table" then
+		return nil
+	end
+
+	local value = toNumber(payload.retry_after) or toNumber(payload.retryAfter)
+	if value ~= nil then
+		return value
+	end
+
+	value = toNumber(readRetryAfterHeader(payload.headers))
+	if value ~= nil then
+		return value
+	end
+
+	local body = payload.body
+	if type(body) == "table" then
+		value = toNumber(body.retry_after) or toNumber(body.retryAfter)
+		if value ~= nil then
+			return value
+		end
+	end
+
+	return nil
+end
+
+local function is429(payload)
+	if type(payload) ~= "table" then
+		return false
+	end
+
+	local code = payload.status or payload.statusCode or payload.code
+	return tonumber(code) == 429
+end
+
+local function get429Delay(packed)
+	local total = rawget(packed, "n") or #packed
+	for i = 2, total do
+		local payload = packed[i]
+		if type(payload) == "table" and type(payload.response) == "table" then
+			payload = payload.response
+		end
+
+		if is429(payload) then
+			return readRetryAfter(payload) or FALLBACK_RETRY_AFTER
+		end
+	end
+
+	return nil
 end
 
 local function cleanPath(route)
@@ -35,10 +136,14 @@ local function cleanPath(route)
 	return path
 end
 
-function RateLimiter:init()
+function RateLimiter:init(opts)
+	opts = opts or {}
+
 	self.buckets = {}
 	self.globalLock = false
 	self.queue = {}
+	self.max429Retries = opts.max429Retries or DEFAULT_429_RETRIES
+	self.sleep = opts.sleep or sleepSeconds
 end
 
 function RateLimiter:normalizeRoute(route)
@@ -115,6 +220,7 @@ function RateLimiter:enqueue(route, request)
 		results = nil,
 		resultCount = 0,
 		error = nil,
+		retries429 = 0,
 	}
 
 	local queue = bucket.queue
@@ -155,14 +261,30 @@ function RateLimiter:processQueue(bucket)
 
 	while #queue > 0 do
 		local task = table.remove(queue, 1)
-		removeGlobalTask(self.queue, task)
 
 		local packed = table.pack(pcall(task.run))
 		local ok = packed[1]
-		task.done = true
-		task.success = ok
+		local retryAfter = get429Delay(packed)
+		if retryAfter ~= nil then
+			task.retries429 = task.retries429 + 1
+			if task.retries429 <= self.max429Retries then
+				table.insert(queue, 1, task)
 
-		if ok then
+				local sleepFn = self.sleep
+				if type(sleepFn) == "function" then
+					pcall(sleepFn, retryAfter)
+				end
+			else
+				task.done = true
+				task.success = false
+				task.error = "Rate limited too many times."
+				removeGlobalTask(self.queue, task)
+				processed = processed + 1
+			end
+		elseif ok then
+			task.done = true
+			task.success = true
+
 			local total = rawget(packed, "n") or #packed
 			local count = total - 1
 			local results = {}
@@ -172,11 +294,15 @@ function RateLimiter:processQueue(bucket)
 
 			task.results = results
 			task.resultCount = count
+			removeGlobalTask(self.queue, task)
+			processed = processed + 1
 		else
+			task.done = true
+			task.success = false
 			task.error = packed[2]
+			removeGlobalTask(self.queue, task)
+			processed = processed + 1
 		end
-
-		processed = processed + 1
 	end
 
 	bucket.processing = false
