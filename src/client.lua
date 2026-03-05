@@ -64,4 +64,19 @@ function Client:emit(event, ...)
 	return self.events:emit(event, ...)
 end
 
+function Client:run(url)
+	local gateway = self.gateway
+	if type(gateway) ~= "table" or type(gateway.connect) ~= "function" then
+		return nil, "Gateway is missing."
+	end
+
+	local ok, err = gateway:connect(url)
+	if not ok then
+		return nil, err
+	end
+
+	self:emit("run", url or gateway.gatewayUrl)
+	return true
+end
+
 return Client
