@@ -192,10 +192,17 @@ function Gateway:send(payload)
 end
 
 function Gateway:sendHeartbeat()
-	local ok, err = self:send({
-		op = HEARTBEAT_OPCODE,
-		d = self.sequence,
-	})
+	local payload
+	if self.sequence == nil then
+		payload = '{"op":1,"d":null}'
+	else
+		payload = {
+			op = HEARTBEAT_OPCODE,
+			d = self.sequence,
+		}
+	end
+
+	local ok, err = self:send(payload)
 
 	if not ok then
 		return nil, err
