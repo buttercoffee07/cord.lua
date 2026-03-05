@@ -2,13 +2,13 @@ local Class = require("src.core.class")
 
 local RateLimiter = Class.extend()
 
-local MAJOR_KEYS = {
+local MAJOR_ROUTE_KEYS = {
 	channels = true,
 	guilds = true,
 	webhooks = true,
 }
 
-local function isSnowflake(value)
+local function isId(value)
 	if type(value) ~= "string" then
 		return false
 	end
@@ -57,9 +57,9 @@ function RateLimiter:normalizeRoute(route)
 		local prev = parts[i - 1]
 		local twoBack = parts[i - 2]
 
-		if isSnowflake(part) then
-			local isMajorId = prev and MAJOR_KEYS[prev]
-			local isWebhookToken = twoBack == "webhooks" and isSnowflake(prev)
+		if isId(part) then
+			local isMajorId = prev and MAJOR_ROUTE_KEYS[prev]
+			local isWebhookToken = twoBack == "webhooks" and isId(prev)
 			if not isMajorId and not isWebhookToken then
 				parts[i] = ":id"
 			end
@@ -87,6 +87,100 @@ function RateLimiter:getBucket(route)
 	}
 	buckets[key] = bucket
 	return bucket
+end
+
+local function removeGlobalTask(queue, task)
+	for i = #queue, 1, -1 do
+		if queue[i] == task then
+			table.remove(queue, i)
+			return
+		end
+	end
+end
+
+function RateLimiter:enqueue(route, request)
+	if type(request) ~= "function" then
+		return nil, "Request must be a function."
+	end
+
+	local bucket, err = self:getBucket(route)
+	if not bucket then
+		return nil, err
+	end
+
+	local task = {
+		run = request,
+		done = false,
+		success = false,
+		results = nil,
+		resultCount = 0,
+		error = nil,
+	}
+
+	local queue = bucket.queue
+	queue[#queue + 1] = task
+	self.queue[#self.queue + 1] = task
+
+	if not bucket.processing then
+		self:processQueue(bucket)
+	end
+
+	if not task.done then
+		return nil, "Request queued."
+	end
+
+	if not task.success then
+		return nil, task.error
+	end
+
+	return table.unpack(task.results, 1, task.resultCount)
+end
+
+function RateLimiter:processQueue(bucket)
+	if type(bucket) ~= "table" then
+		return nil, "Bucket is required."
+	end
+
+	local queue = bucket.queue
+	if type(queue) ~= "table" then
+		return nil, "Invalid bucket queue."
+	end
+
+	if bucket.processing then
+		return false
+	end
+
+	bucket.processing = true
+	local processed = 0
+
+	while #queue > 0 do
+		local task = table.remove(queue, 1)
+		removeGlobalTask(self.queue, task)
+
+		local packed = table.pack(pcall(task.run))
+		local ok = packed[1]
+		task.done = true
+		task.success = ok
+
+		if ok then
+			local total = rawget(packed, "n") or #packed
+			local count = total - 1
+			local results = {}
+			for i = 1, count do
+				results[i] = packed[i + 1]
+			end
+
+			task.results = results
+			task.resultCount = count
+		else
+			task.error = packed[2]
+		end
+
+		processed = processed + 1
+	end
+
+	bucket.processing = false
+	return true, processed
 end
 
 return RateLimiter
