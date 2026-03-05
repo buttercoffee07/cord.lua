@@ -4,6 +4,7 @@ local EventEmitter = require("src.core.event_emitter")
 local Gateway = Class.extend()
 
 local DEFAULT_GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
+local HELLO_OPCODE = 10
 
 local function loadJsonAdapter()
 	local ok, cjson = pcall(require, "cjson")
@@ -61,6 +62,7 @@ function Gateway:init(opts)
 	self.events = opts.events or EventEmitter.new()
 	self.socket = nil
 	self.connected = false
+	self.heartbeatInterval = nil
 end
 
 function Gateway:on(event, handler)
@@ -97,6 +99,39 @@ function Gateway:decodeMessage(raw)
 	return payload
 end
 
+function Gateway:handleHello(payload)
+	local data = payload.d
+	if type(data) ~= "table" then
+		return nil, "HELLO payload is missing data."
+	end
+
+	local interval = tonumber(data.heartbeat_interval)
+	if not interval or interval <= 0 then
+		return nil, "HELLO payload has invalid heartbeat interval."
+	end
+
+	self.heartbeatInterval = interval
+	self:emit("hello", interval, payload)
+	return true
+end
+
+function Gateway:handlePayload(payload)
+	if type(payload) ~= "table" then
+		return
+	end
+
+	if payload.op == HELLO_OPCODE then
+		local ok, err = self:handleHello(payload)
+		if not ok then
+			self:emit("error", {
+				code = "gateway_hello_invalid",
+				message = err,
+				payload = payload,
+			})
+		end
+	end
+end
+
 function Gateway:attachMessageListener(socket)
 	local ok = bindSocketEvent(socket, "message", function(raw)
 		local payload, err = self:decodeMessage(raw)
@@ -110,6 +145,7 @@ function Gateway:attachMessageListener(socket)
 		end
 
 		self:emit("message", payload, raw)
+		self:handlePayload(payload)
 	end)
 
 	if not ok then
