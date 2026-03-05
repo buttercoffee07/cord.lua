@@ -176,28 +176,31 @@ function RestClient:request(method, route, body)
 			return nil, err
 		end
 
-		return nil, makeError("request_failed", err or "Request failed.", {
-			method = methodUpper,
-			route = route,
-		})
+		return nil,
+			makeError("request_failed", err or "Request failed.", {
+				method = methodUpper,
+				route = route,
+			})
 	end
 
 	local rawBody = res.body
 	if type(rawBody) == "string" and rawBody ~= "" and hasJsonContentType(res.headers) then
 		local json = self.json
 		if not json then
-			return nil, makeError("missing_json_decoder", "JSON decoder is missing.", {
-				method = methodUpper,
-				route = route,
-			})
+			return nil,
+				makeError("missing_json_decoder", "JSON decoder is missing.", {
+					method = methodUpper,
+					route = route,
+				})
 		end
 
 		local okDecode, decoded, decodeErr = pcall(json.decode, rawBody)
 		if not okDecode or decoded == nil then
-			return nil, makeError("decode_failed", decodeErr or "Failed to decode response body.", {
-				method = methodUpper,
-				route = route,
-			})
+			return nil,
+				makeError("decode_failed", decodeErr or "Failed to decode response body.", {
+					method = methodUpper,
+					route = route,
+				})
 		end
 		res.data = decoded
 	end
@@ -214,13 +217,14 @@ function RestClient:request(method, route, body)
 			apiCode = res.data.code
 		end
 
-		return nil, makeError("http_error", msg, {
-			method = methodUpper,
-			route = route,
-			status = status,
-			apiCode = apiCode,
-			response = res,
-		})
+		return nil,
+			makeError("http_error", msg, {
+				method = methodUpper,
+				route = route,
+				status = status,
+				apiCode = apiCode,
+				response = res,
+			})
 	end
 
 	return res

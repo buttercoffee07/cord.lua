@@ -6,8 +6,16 @@ local Gateway = Class.extend()
 local DEFAULT_GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
 local DISPATCH_OPCODE = 0
 local HEARTBEAT_OPCODE = 1
-local HELLO_OPCODE = 10
 local IDENTIFY_OPCODE = 2
+local RESUME_OPCODE = 6
+local RECONNECT_OPCODE = 7
+local INVALID_SESSION_OPCODE = 9
+local HELLO_OPCODE = 10
+local READY_EVENT = "READY"
+local DEFAULT_RECONNECT_BASE = 1
+local DEFAULT_RECONNECT_MAX = 30
+local INVALID_SESSION_MIN_WAIT = 1
+local INVALID_SESSION_MAX_WAIT = 5
 
 local function loadJsonAdapter()
 	local ok, cjson = pcall(require, "cjson")
@@ -98,11 +106,18 @@ function Gateway:init(opts)
 	self.heartbeatInterval = nil
 	self.heartbeatRunning = false
 	self.heartbeatThread = nil
-	self.identifyProperties = opts.identifyProperties or {
-		os = "linux",
-		browser = "cord.lua",
-		device = "cord.lua",
-	}
+	self.reconnectRunning = false
+	self.reconnectAttempts = 0
+	self.reconnectBaseDelay = opts.reconnectBaseDelay or DEFAULT_RECONNECT_BASE
+	self.reconnectMaxDelay = opts.reconnectMaxDelay or DEFAULT_RECONNECT_MAX
+	self.autoReconnect = opts.autoReconnect ~= false
+	self.random = opts.random or math.random
+	self.identifyProperties = opts.identifyProperties
+		or {
+			os = "linux",
+			browser = "cord.lua",
+			device = "cord.lua",
+		}
 end
 
 function Gateway:on(event, handler)
@@ -210,6 +225,162 @@ function Gateway:sendIdentify()
 	end
 
 	self:emit("identify", payload)
+	return true
+end
+
+function Gateway:sendResume()
+	if type(self.token) ~= "string" or self.token == "" then
+		return nil, "Gateway token is missing."
+	end
+
+	if type(self.sessionId) ~= "string" or self.sessionId == "" then
+		return nil, "Gateway session ID is missing."
+	end
+
+	if type(self.sequence) ~= "number" then
+		return nil, "Gateway sequence is missing."
+	end
+
+	local payload = {
+		op = RESUME_OPCODE,
+		d = {
+			token = self.token,
+			session_id = self.sessionId,
+			seq = self.sequence,
+		},
+	}
+
+	local ok, err = self:send(payload)
+	if not ok then
+		return nil, err
+	end
+
+	self:emit("resume", payload)
+	return true
+end
+
+function Gateway:resetReconnectBackoff()
+	self.reconnectRunning = false
+	self.reconnectAttempts = 0
+	return true
+end
+
+function Gateway:getReconnectDelay()
+	local attempt = self.reconnectAttempts
+	if type(attempt) ~= "number" or attempt <= 0 then
+		return 0
+	end
+
+	local base = tonumber(self.reconnectBaseDelay) or DEFAULT_RECONNECT_BASE
+	local maxDelay = tonumber(self.reconnectMaxDelay) or DEFAULT_RECONNECT_MAX
+
+	if base <= 0 then
+		base = DEFAULT_RECONNECT_BASE
+	end
+
+	if maxDelay < base then
+		maxDelay = base
+	end
+
+	local delay = base * (2 ^ (attempt - 1))
+	if delay > maxDelay then
+		delay = maxDelay
+	end
+
+	return delay
+end
+
+function Gateway:dropConnection(closeSocket)
+	self:stopHeartbeatLoop()
+	self.connected = false
+
+	local socket = self.socket
+	self.socket = nil
+	if not closeSocket or type(socket) ~= "table" then
+		return true
+	end
+
+	local close = socket.close or socket.Close
+	if type(close) ~= "function" then
+		return true
+	end
+
+	pcall(close, socket)
+	return true
+end
+
+function Gateway:scheduleReconnect(opts)
+	opts = opts or {}
+
+	if self.reconnectRunning then
+		return true
+	end
+
+	local canResume = opts.canResume ~= false
+	if not canResume then
+		self.sessionId = nil
+		self.sequence = nil
+	end
+
+	local reason = opts.reason or "unknown"
+	local minDelay = tonumber(opts.minDelay) or 0
+	if minDelay < 0 then
+		minDelay = 0
+	end
+
+	local spawn = self.spawn
+	local sleep = self.sleep
+	if type(spawn) ~= "function" or type(sleep) ~= "function" then
+		return nil, "Reconnect scheduler is missing."
+	end
+
+	self.reconnectRunning = true
+	self:dropConnection(true)
+
+	local function attempt()
+		if not self.reconnectRunning then
+			return
+		end
+
+		self.reconnectAttempts = self.reconnectAttempts + 1
+		local delay = self:getReconnectDelay()
+		if delay < minDelay then
+			delay = minDelay
+		end
+
+		self:emit("reconnect_attempt", {
+			reason = reason,
+			attempt = self.reconnectAttempts,
+			delay = delay,
+			canResume = canResume,
+		})
+
+		if delay > 0 then
+			sleep(delay)
+		end
+
+		if not self.reconnectRunning then
+			return
+		end
+
+		local okConnect, connectErr = self:connect(self.gatewayUrl)
+		if okConnect then
+			self:resetReconnectBackoff()
+			self:emit("reconnect_success", reason)
+			return
+		end
+
+		self:emit("error", {
+			code = "gateway_reconnect_failed",
+			message = connectErr,
+			reason = reason,
+			attempt = self.reconnectAttempts,
+		})
+
+		spawn(attempt)
+	end
+
+	spawn(attempt)
 	return true
 end
 
@@ -330,12 +501,23 @@ function Gateway:handleHello(payload)
 	self.heartbeatInterval = interval
 	self:emit("hello", interval, payload)
 
-	local okIdentify, identifyErr = self:sendIdentify()
-	if not okIdentify then
-		self:emit("error", {
-			code = "gateway_identify_failed",
-			message = identifyErr,
-		})
+	local canResume = type(self.sessionId) == "string" and self.sessionId ~= "" and type(self.sequence) == "number"
+	if canResume then
+		local okResume, resumeErr = self:sendResume()
+		if not okResume then
+			self:emit("error", {
+				code = "gateway_resume_failed",
+				message = resumeErr,
+			})
+		end
+	else
+		local okIdentify, identifyErr = self:sendIdentify()
+		if not okIdentify then
+			self:emit("error", {
+				code = "gateway_identify_failed",
+				message = identifyErr,
+			})
+		end
 	end
 
 	local okStart, startErr = self:startHeartbeatLoop()
@@ -355,8 +537,56 @@ function Gateway:handleDispatch(payload)
 		return nil, "Dispatch payload is missing event name."
 	end
 
+	if eventName == READY_EVENT then
+		local data = payload.d
+		if type(data) == "table" and type(data.session_id) == "string" and data.session_id ~= "" then
+			self.sessionId = data.session_id
+		end
+	end
+
 	self:emit("dispatch", eventName, payload.d, payload)
 	self:emit(eventName, payload.d, payload)
+	return true
+end
+
+function Gateway:handleReconnectRequest(payload)
+	self:emit("reconnect_requested", payload)
+	local ok, err = self:scheduleReconnect({
+		reason = "opcode_7",
+		canResume = true,
+	})
+
+	if not ok then
+		return nil, err
+	end
+
+	return true
+end
+
+function Gateway:handleInvalidSession(payload)
+	local canResume = payload.d == true
+	self:emit("invalid_session", canResume, payload)
+
+	local minDelay = 0
+	if not canResume then
+		local random = self.random
+		if type(random) == "function" then
+			minDelay = random(INVALID_SESSION_MIN_WAIT, INVALID_SESSION_MAX_WAIT)
+		else
+			minDelay = INVALID_SESSION_MIN_WAIT
+		end
+	end
+
+	local ok, err = self:scheduleReconnect({
+		reason = "opcode_9",
+		canResume = canResume,
+		minDelay = minDelay,
+	})
+
+	if not ok then
+		return nil, err
+	end
+
 	return true
 end
 
@@ -375,6 +605,30 @@ function Gateway:handlePayload(payload)
 		if not ok then
 			self:emit("error", {
 				code = "gateway_dispatch_invalid",
+				message = err,
+				payload = payload,
+			})
+		end
+		return
+	end
+
+	if payload.op == RECONNECT_OPCODE then
+		local ok, err = self:handleReconnectRequest(payload)
+		if not ok then
+			self:emit("error", {
+				code = "gateway_reconnect_invalid",
+				message = err,
+				payload = payload,
+			})
+		end
+		return
+	end
+
+	if payload.op == INVALID_SESSION_OPCODE then
+		local ok, err = self:handleInvalidSession(payload)
+		if not ok then
+			self:emit("error", {
+				code = "gateway_invalid_session_failed",
 				message = err,
 				payload = payload,
 			})
@@ -428,6 +682,8 @@ function Gateway:connect(url)
 		return nil, "Gateway URL is required."
 	end
 
+	self.gatewayUrl = targetUrl
+
 	local okConnect, socket = pcall(wsFactory, targetUrl)
 	if not okConnect or type(socket) ~= "table" then
 		return nil, "Failed to connect to gateway."
@@ -442,6 +698,20 @@ function Gateway:connect(url)
 		self:stopHeartbeatLoop()
 		self.connected = false
 		self:emit("close", ...)
+
+		if self.autoReconnect and not self.reconnectRunning then
+			local okReconnect, reconnectErr = self:scheduleReconnect({
+				reason = "socket_close",
+				canResume = true,
+			})
+
+			if not okReconnect then
+				self:emit("error", {
+					code = "gateway_reconnect_schedule_failed",
+					message = reconnectErr,
+				})
+			end
+		end
 	end)
 
 	bindSocketEvent(socket, "error", function(...)
