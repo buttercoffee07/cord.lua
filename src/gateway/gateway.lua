@@ -4,6 +4,7 @@ local EventEmitter = require("src.core.event_emitter")
 local Gateway = Class.extend()
 
 local DEFAULT_GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
+local DISPATCH_OPCODE = 0
 local HEARTBEAT_OPCODE = 1
 local HELLO_OPCODE = 10
 local IDENTIFY_OPCODE = 2
@@ -348,8 +349,36 @@ function Gateway:handleHello(payload)
 	return true
 end
 
+function Gateway:handleDispatch(payload)
+	local eventName = payload.t
+	if type(eventName) ~= "string" or eventName == "" then
+		return nil, "Dispatch payload is missing event name."
+	end
+
+	self:emit("dispatch", eventName, payload.d, payload)
+	self:emit(eventName, payload.d, payload)
+	return true
+end
+
 function Gateway:handlePayload(payload)
 	if type(payload) ~= "table" then
+		return
+	end
+
+	local seq = payload.s
+	if type(seq) == "number" then
+		self.sequence = seq
+	end
+
+	if payload.op == DISPATCH_OPCODE then
+		local ok, err = self:handleDispatch(payload)
+		if not ok then
+			self:emit("error", {
+				code = "gateway_dispatch_invalid",
+				message = err,
+				payload = payload,
+			})
+		end
 		return
 	end
 
