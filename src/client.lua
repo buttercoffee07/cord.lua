@@ -2,6 +2,7 @@ local Class = require("src.core.class")
 local EventEmitter = require("src.core.event_emitter")
 local RestClient = require("src.http.rest_client")
 local Gateway = require("src.gateway.gateway")
+local RuntimeDefaults = require("src.runtime.defaults")
 
 local Client = Class.extend()
 
@@ -10,15 +11,29 @@ function Client:init(opts)
 
 	self.token = opts.token
 	self.intents = opts.intents or 0
+	self.autoLoop = opts.autoLoop == true
 
 	self.events = opts.events or EventEmitter.new()
+	self.runtime = opts.runtime
+
+	if not self.runtime and opts.autoRuntime ~= false then
+		self.runtime = RuntimeDefaults.load()
+	end
+
+	local runtime = self.runtime or {}
+	local requestFn = opts.requestFn or runtime.requestFn
+	local wsFactory = opts.wsFactory or runtime.wsFactory
+	local spawn = opts.spawn or runtime.spawn
+	local sleep = opts.sleep or runtime.sleep
+
+	self.loopFn = opts.loopFn or opts.loop or runtime.loop
 
 	self.rest = opts.rest
 		or RestClient.new({
 			token = self.token,
 			rateLimiter = opts.rateLimiter,
 			baseUrl = opts.baseUrl,
-			requestFn = opts.requestFn,
+			requestFn = requestFn,
 			json = opts.restJson or opts.json,
 		})
 
@@ -27,10 +42,10 @@ function Client:init(opts)
 			token = self.token,
 			intents = self.intents,
 			gatewayUrl = opts.gatewayUrl,
-			wsFactory = opts.wsFactory,
+			wsFactory = wsFactory,
 			json = opts.gatewayJson or opts.json,
-			spawn = opts.spawn,
-			sleep = opts.sleep,
+			spawn = spawn,
+			sleep = sleep,
 			identifyProperties = opts.identifyProperties,
 			autoReconnect = opts.autoReconnect,
 			reconnectBaseDelay = opts.reconnectBaseDelay,
@@ -77,6 +92,39 @@ function Client:run(url)
 
 	self:emit("run", url or gateway.gatewayUrl)
 	return true
+end
+
+function Client:runWithLoop(url)
+	local loopFn = self.loopFn
+	if type(loopFn) ~= "function" then
+		return nil, "Loop runner is missing."
+	end
+
+	local spawn = self.gateway and self.gateway.spawn
+	if type(spawn) ~= "function" then
+		return nil, "Scheduler is missing."
+	end
+
+	local started = false
+	local runErr = nil
+
+	spawn(function()
+		local ok, err = self:run(url)
+		if not ok then
+			runErr = err
+			return
+		end
+
+		started = true
+	end)
+
+	loopFn()
+
+	if started then
+		return true
+	end
+
+	return nil, runErr or "Loop stopped before client started."
 end
 
 return Client
