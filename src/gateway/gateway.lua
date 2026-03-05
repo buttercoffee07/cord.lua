@@ -6,6 +6,7 @@ local Gateway = Class.extend()
 local DEFAULT_GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
 local HEARTBEAT_OPCODE = 1
 local HELLO_OPCODE = 10
+local IDENTIFY_OPCODE = 2
 
 local function loadJsonAdapter()
 	local ok, cjson = pcall(require, "cjson")
@@ -96,6 +97,11 @@ function Gateway:init(opts)
 	self.heartbeatInterval = nil
 	self.heartbeatRunning = false
 	self.heartbeatThread = nil
+	self.identifyProperties = opts.identifyProperties or {
+		os = "linux",
+		browser = "cord.lua",
+		device = "cord.lua",
+	}
 end
 
 function Gateway:on(event, handler)
@@ -180,6 +186,29 @@ function Gateway:sendHeartbeat()
 	end
 
 	self:emit("heartbeat", self.sequence)
+	return true
+end
+
+function Gateway:sendIdentify()
+	if type(self.token) ~= "string" or self.token == "" then
+		return nil, "Gateway token is missing."
+	end
+
+	local payload = {
+		op = IDENTIFY_OPCODE,
+		d = {
+			token = self.token,
+			intents = self.intents,
+			properties = self.identifyProperties,
+		},
+	}
+
+	local ok, err = self:send(payload)
+	if not ok then
+		return nil, err
+	end
+
+	self:emit("identify", payload)
 	return true
 end
 
@@ -299,6 +328,14 @@ function Gateway:handleHello(payload)
 
 	self.heartbeatInterval = interval
 	self:emit("hello", interval, payload)
+
+	local okIdentify, identifyErr = self:sendIdentify()
+	if not okIdentify then
+		self:emit("error", {
+			code = "gateway_identify_failed",
+			message = identifyErr,
+		})
+	end
 
 	local okStart, startErr = self:startHeartbeatLoop()
 	if not okStart then
