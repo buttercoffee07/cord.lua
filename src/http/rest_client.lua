@@ -120,13 +120,23 @@ function RestClient:request(method, route, body)
 		body = payload,
 	}
 
-	local okCall, res = pcall(requestFn, req)
-	if not okCall then
-		return nil, res
+	local limiter = self.rateLimiter
+	if type(limiter) ~= "table" or type(limiter.enqueue) ~= "function" then
+		return nil, "Rate limiter is missing."
 	end
 
+	local function sendRequest()
+		local res = requestFn(req)
+		if type(res) ~= "table" then
+			return nil, "HTTP adapter returned invalid response."
+		end
+
+		return res
+	end
+
+	local res, err = limiter:enqueue(route, sendRequest)
 	if type(res) ~= "table" then
-		return nil, "HTTP adapter returned invalid response."
+		return nil, err or "Request failed."
 	end
 
 	local rawBody = res.body
