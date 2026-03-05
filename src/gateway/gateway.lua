@@ -4,22 +4,24 @@ local EventEmitter = require("src.core.event_emitter")
 local Gateway = Class.extend()
 
 local DEFAULT_GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
+local HEARTBEAT_OPCODE = 1
 local HELLO_OPCODE = 10
 
 local function loadJsonAdapter()
 	local ok, cjson = pcall(require, "cjson")
-	if ok and cjson and cjson.decode then
+	if ok and cjson and cjson.decode and cjson.encode then
 		return cjson
 	end
 
 	local okSafe, cjsonSafe = pcall(require, "cjson.safe")
-	if okSafe and cjsonSafe and cjsonSafe.decode then
+	if okSafe and cjsonSafe and cjsonSafe.decode and cjsonSafe.encode then
 		return cjsonSafe
 	end
 
 	local okDk, dkjson = pcall(require, "dkjson")
-	if okDk and dkjson and dkjson.decode then
+	if okDk and dkjson and dkjson.decode and dkjson.encode then
 		return {
+			encode = dkjson.encode,
 			decode = function(text)
 				local value, _, err = dkjson.decode(text)
 				if err then
@@ -49,6 +51,33 @@ local function bindSocketEvent(socket, name, handler)
 	return false
 end
 
+local function readTaskTable()
+	local taskLib = rawget(_G, "task")
+	if type(taskLib) ~= "table" then
+		return nil
+	end
+
+	return taskLib
+end
+
+local function defaultSpawn(fn)
+	local taskLib = readTaskTable()
+	if not taskLib or type(taskLib.spawn) ~= "function" then
+		return nil
+	end
+
+	return taskLib.spawn(fn)
+end
+
+local function defaultSleep(seconds)
+	local taskLib = readTaskTable()
+	if not taskLib or type(taskLib.wait) ~= "function" then
+		return nil
+	end
+
+	return taskLib.wait(seconds)
+end
+
 function Gateway:init(opts)
 	opts = opts or {}
 
@@ -60,9 +89,13 @@ function Gateway:init(opts)
 	self.wsFactory = opts.wsFactory
 	self.json = opts.json or loadJsonAdapter()
 	self.events = opts.events or EventEmitter.new()
+	self.spawn = opts.spawn or defaultSpawn
+	self.sleep = opts.sleep or defaultSleep
 	self.socket = nil
 	self.connected = false
 	self.heartbeatInterval = nil
+	self.heartbeatRunning = false
+	self.heartbeatThread = nil
 end
 
 function Gateway:on(event, handler)
@@ -99,6 +132,160 @@ function Gateway:decodeMessage(raw)
 	return payload
 end
 
+function Gateway:send(payload)
+	local socket = self.socket
+	if type(socket) ~= "table" then
+		return nil, "Socket is not connected."
+	end
+
+	local send = socket.send or socket.Send
+	if type(send) ~= "function" then
+		return nil, "Socket does not support send."
+	end
+
+	local wire = payload
+	if type(payload) == "table" then
+		local json = self.json
+		if not json or type(json.encode) ~= "function" then
+			return nil, "JSON encoder is missing."
+		end
+
+		local okEncode, encoded = pcall(json.encode, payload)
+		if not okEncode or type(encoded) ~= "string" then
+			return nil, "Failed to encode gateway payload."
+		end
+		wire = encoded
+	end
+
+	if type(wire) ~= "string" then
+		return nil, "Gateway payload must be a string or table."
+	end
+
+	local okSend, sendErr = pcall(send, socket, wire)
+	if not okSend then
+		return nil, sendErr or "Failed to send gateway payload."
+	end
+
+	return true
+end
+
+function Gateway:sendHeartbeat()
+	local ok, err = self:send({
+		op = HEARTBEAT_OPCODE,
+		d = self.sequence,
+	})
+
+	if not ok then
+		return nil, err
+	end
+
+	self:emit("heartbeat", self.sequence)
+	return true
+end
+
+function Gateway:stopHeartbeatLoop()
+	self.heartbeatRunning = false
+	self.heartbeatThread = nil
+	return true
+end
+
+function Gateway:startHeartbeatLoop()
+	local interval = self.heartbeatInterval
+	if type(interval) ~= "number" or interval <= 0 then
+		return nil, "Heartbeat interval is missing."
+	end
+
+	if self.heartbeatRunning then
+		return true
+	end
+
+	local spawn = self.spawn
+	local sleep = self.sleep
+	if type(spawn) ~= "function" or type(sleep) ~= "function" then
+		return nil, "Heartbeat scheduler is missing."
+	end
+
+	if spawn == defaultSpawn then
+		local taskLib = readTaskTable()
+		if not taskLib or type(taskLib.spawn) ~= "function" then
+			return nil, "Heartbeat scheduler is missing."
+		end
+	end
+
+	if sleep == defaultSleep then
+		local taskLib = readTaskTable()
+		if not taskLib or type(taskLib.wait) ~= "function" then
+			return nil, "Heartbeat scheduler is missing."
+		end
+	end
+
+	local waitSeconds = interval / 1000
+	self.heartbeatRunning = true
+
+	local thread = coroutine.create(function()
+		while self.connected and self.heartbeatRunning do
+			local okBeat, beatErr = self:sendHeartbeat()
+			if not okBeat then
+				self:emit("error", {
+					code = "gateway_heartbeat_send_failed",
+					message = beatErr,
+				})
+			end
+
+			coroutine.yield(waitSeconds)
+		end
+	end)
+
+	self.heartbeatThread = thread
+
+	local function step(delay)
+		if not self.connected or not self.heartbeatRunning then
+			return
+		end
+
+		if type(delay) == "number" and delay > 0 then
+			sleep(delay)
+		end
+
+		if not self.connected or not self.heartbeatRunning then
+			return
+		end
+
+		local okResume, nextDelay = coroutine.resume(thread)
+		if not okResume then
+			self:stopHeartbeatLoop()
+			self:emit("error", {
+				code = "gateway_heartbeat_loop_crash",
+				message = nextDelay,
+			})
+			return
+		end
+
+		if coroutine.status(thread) == "dead" then
+			self:stopHeartbeatLoop()
+			return
+		end
+
+		spawn(function()
+			step(nextDelay)
+		end)
+	end
+
+	local okResume, firstDelay = coroutine.resume(thread)
+	if not okResume then
+		self:stopHeartbeatLoop()
+		return nil, firstDelay
+	end
+
+	if coroutine.status(thread) ~= "dead" then
+		spawn(function()
+			step(firstDelay)
+		end)
+	end
+
+	return true
+end
+
 function Gateway:handleHello(payload)
 	local data = payload.d
 	if type(data) ~= "table" then
@@ -112,6 +299,15 @@ function Gateway:handleHello(payload)
 
 	self.heartbeatInterval = interval
 	self:emit("hello", interval, payload)
+
+	local okStart, startErr = self:startHeartbeatLoop()
+	if not okStart then
+		self:emit("error", {
+			code = "gateway_heartbeat_start_failed",
+			message = startErr,
+		})
+	end
+
 	return true
 end
 
@@ -177,6 +373,7 @@ function Gateway:connect(url)
 	end
 
 	bindSocketEvent(socket, "close", function(...)
+		self:stopHeartbeatLoop()
 		self.connected = false
 		self:emit("close", ...)
 	end)
