@@ -101,7 +101,24 @@ local function is429(payload)
 	return tonumber(code) == 429
 end
 
-local function get429Delay(packed)
+local function isGlobal429(payload)
+	if type(payload) ~= "table" then
+		return false
+	end
+
+	if payload.global == true then
+		return true
+	end
+
+	local body = payload.body
+	if type(body) == "table" and body.global == true then
+		return true
+	end
+
+	return false
+end
+
+local function get429Meta(packed)
 	local total = rawget(packed, "n") or #packed
 	for i = 2, total do
 		local payload = packed[i]
@@ -110,7 +127,7 @@ local function get429Delay(packed)
 		end
 
 		if is429(payload) then
-			return readRetryAfter(payload) or FALLBACK_RETRY_AFTER
+			return readRetryAfter(payload) or FALLBACK_RETRY_AFTER, isGlobal429(payload)
 		end
 	end
 
@@ -141,9 +158,11 @@ function RateLimiter:init(opts)
 
 	self.buckets = {}
 	self.globalLock = false
+	self.globalLockUntil = 0
 	self.queue = {}
 	self.max429Retries = opts.max429Retries or DEFAULT_429_RETRIES
 	self.sleep = opts.sleep or sleepSeconds
+	self.now = opts.now or os.clock
 end
 
 function RateLimiter:normalizeRoute(route)
@@ -203,6 +222,55 @@ local function removeGlobalTask(queue, task)
 	end
 end
 
+local function syncGlobalLock(state)
+	if not state.globalLock then
+		return false
+	end
+
+	local nowFn = state.now
+	if type(nowFn) ~= "function" then
+		return false
+	end
+
+	if nowFn() < state.globalLockUntil then
+		return true
+	end
+
+	state.globalLock = false
+	state.globalLockUntil = 0
+	return false
+end
+
+local function lockGlobal(state, seconds)
+	local nowFn = state.now
+	if type(nowFn) ~= "function" then
+		return
+	end
+
+	local untilAt = nowFn() + seconds
+	if state.globalLockUntil < untilAt then
+		state.globalLockUntil = untilAt
+	end
+	state.globalLock = true
+end
+
+local function waitIfGlobalLocked(state)
+	if not syncGlobalLock(state) then
+		return
+	end
+
+	local nowFn = state.now
+	local waitFor = state.globalLockUntil - nowFn()
+	if waitFor > 0 then
+		local sleepFn = state.sleep
+		if type(sleepFn) == "function" then
+			pcall(sleepFn, waitFor)
+		end
+	end
+
+	syncGlobalLock(state)
+end
+
 function RateLimiter:enqueue(route, request)
 	if type(request) ~= "function" then
 		return nil, "Request must be a function."
@@ -260,19 +328,27 @@ function RateLimiter:processQueue(bucket)
 	local processed = 0
 
 	while #queue > 0 do
+		waitIfGlobalLocked(self)
+
 		local task = table.remove(queue, 1)
 
 		local packed = table.pack(pcall(task.run))
 		local ok = packed[1]
-		local retryAfter = get429Delay(packed)
+		local retryAfter, isGlobal = get429Meta(packed)
 		if retryAfter ~= nil then
 			task.retries429 = task.retries429 + 1
+			if isGlobal then
+				lockGlobal(self, retryAfter)
+			end
+
 			if task.retries429 <= self.max429Retries then
 				table.insert(queue, 1, task)
 
-				local sleepFn = self.sleep
-				if type(sleepFn) == "function" then
-					pcall(sleepFn, retryAfter)
+				if not isGlobal then
+					local sleepFn = self.sleep
+					if type(sleepFn) == "function" then
+						pcall(sleepFn, retryAfter)
+					end
 				end
 			else
 				task.done = true
