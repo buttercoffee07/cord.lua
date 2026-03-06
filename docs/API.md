@@ -48,12 +48,15 @@ Common options:
 
 - `token` string
 - `intents` number
+- `selfbot` boolean (uses raw REST auth; gateway `intents` are omitted unless explicitly provided)
 - `autoRuntime` boolean (default true)
 - `runtime` table (manual adapters)
 - `autoLoop` boolean
 - `logEnabled`, `logLevel`, `logTag`
 - adapter overrides: `requestFn`, `wsFactory`, `spawn`, `sleep`, `loopFn`, `exitLoopFn`
 - gateway overrides: `gatewayUrl`, `autoReconnect`, `reconnectBaseDelay`, `reconnectMaxDelay`
+
+When `selfbot = true`, Cord also caches `client.user` / `client.userId` from `READY` and `fetchSelf()`.
 
 ### Events
 
@@ -135,8 +138,10 @@ Main fields:
 - `message.id` string?
 - `message.content` string
 - `message.author` table?
+- `message.authorId` string?
 - `message.channelId` string?
 - `message.guildId` string?
+- `message.isSelf` boolean
 - `message.raw` table? (from `BaseStructure`)
 - `message.client` `Client`
 

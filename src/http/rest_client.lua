@@ -270,6 +270,7 @@ function RestClient:init(opts)
 	opts = opts or {}
 
 	self.token = opts.token
+	self.selfbot = opts.selfbot == true
 	self.rateLimiter = opts.rateLimiter
 		or RateLimiter.new({
 			sleep = opts.sleep,
@@ -304,7 +305,11 @@ function RestClient:request(method, route, body)
 	}
 
 	if type(self.token) == "string" and self.token ~= "" then
-		headers.Authorization = "Bot " .. self.token
+		if self.selfbot then
+			headers.Authorization = self.token
+		else
+			headers.Authorization = "Bot " .. self.token
+		end
 	end
 
 	local payload = nil

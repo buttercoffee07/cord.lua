@@ -21,7 +21,33 @@ local function copyTable(input)
 	return out
 end
 
+local function cacheSelfUser(client, data)
+	if type(data) ~= "table" then
+		return data
+	end
+
+	local user = data.user
+	if type(user) ~= "table" then
+		return data
+	end
+
+	client.user = user
+	local userId = user.id
+	if userId ~= nil then
+		userId = tostring(userId)
+		if userId ~= "" then
+			client.userId = userId
+		end
+	end
+
+	return data
+end
+
 local function parseDispatchData(client, eventName, data)
+	if eventName == "READY" and type(data) == "table" then
+		return cacheSelfUser(client, data)
+	end
+
 	if eventName == "MESSAGE_CREATE" and type(data) == "table" then
 		return Message.new(client, data)
 	end
@@ -102,8 +128,14 @@ function Client:init(opts)
 	opts = opts or {}
 
 	self.token = opts.token
-	self.intents = opts.intents or 0
+	self.selfbot = opts.selfbot == true
+	self.intents = opts.intents
+	if not self.selfbot and self.intents == nil then
+		self.intents = 0
+	end
 	self.autoLoop = opts.autoLoop == true
+	self.user = nil
+	self.userId = nil
 
 	self.events = opts.events or EventEmitter.new()
 	self.logger = opts.logger
@@ -135,6 +167,7 @@ function Client:init(opts)
 	self.rest = opts.rest
 		or RestClient.new({
 			token = self.token,
+			selfbot = self.selfbot,
 			rateLimiter = opts.rateLimiter,
 			baseUrl = opts.baseUrl,
 			requestFn = requestFn,
@@ -145,6 +178,7 @@ function Client:init(opts)
 	self.gateway = opts.gateway
 		or Gateway.new({
 			token = self.token,
+			selfbot = self.selfbot,
 			intents = self.intents,
 			gatewayUrl = opts.gatewayUrl,
 			wsFactory = wsFactory,
@@ -363,7 +397,18 @@ function Client:delete(route, query)
 end
 
 function Client:fetchSelf()
-	return callRest(self, "getCurrentUser")
+	local res, err = callRest(self, "getCurrentUser")
+	if not res then
+		return nil, err
+	end
+
+	if type(res.data) == "table" then
+		cacheSelfUser(self, {
+			user = res.data,
+		})
+	end
+
+	return res
 end
 
 function Client:fetchUser(userId)

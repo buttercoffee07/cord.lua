@@ -119,7 +119,8 @@ function Gateway:init(opts)
 	opts = opts or {}
 
 	self.token = opts.token
-	self.intents = opts.intents or 0
+	self.selfbot = opts.selfbot == true
+	self.intents = opts.intents
 	self.sessionId = nil
 	self.sequence = nil
 	self.gatewayUrl = opts.gatewayUrl or DEFAULT_GATEWAY_URL
@@ -293,13 +294,18 @@ function Gateway:sendIdentify()
 		return nil, "Gateway token is missing."
 	end
 
+	local identifyData = {
+		token = self.token,
+		properties = self.identifyProperties,
+	}
+
+	if type(self.intents) == "number" then
+		identifyData.intents = self.intents
+	end
+
 	local payload = {
 		op = IDENTIFY_OPCODE,
-		d = {
-			token = self.token,
-			intents = self.intents,
-			properties = self.identifyProperties,
-		},
+		d = identifyData,
 	}
 
 	local ok, err = self:send(payload)

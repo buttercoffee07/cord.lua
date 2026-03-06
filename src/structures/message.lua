@@ -45,8 +45,10 @@ function Message:patch(data)
 	self.id = data.id and tostring(data.id) or nil
 	self.content = data.content or ""
 	self.author = data.author
+	self.authorId = data.author and data.author.id and tostring(data.author.id) or nil
 	self.channelId = data.channel_id and tostring(data.channel_id) or nil
 	self.guildId = data.guild_id and tostring(data.guild_id) or nil
+	self.isSelf = self.authorId ~= nil and self.authorId ~= "" and self.authorId == self.client.userId
 	return self
 end
 

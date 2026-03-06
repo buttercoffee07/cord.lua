@@ -110,6 +110,38 @@ if not ok then
 end
 ```
 
+## Selfbot mode
+
+`Client.new({...})` also accepts `selfbot = true`.
+
+That switches the auth and state handling for user-token sessions:
+
+- REST sends the raw token in `Authorization`
+- Gateway identify omits `intents` unless you explicitly pass one
+- `READY` and `client:fetchSelf()` cache `client.user` and `client.userId`
+- `MESSAGE_CREATE` exposes `message.authorId` and `message.isSelf`
+
+```lua
+local Cord = require("src")
+
+local client = Cord.new({
+	token = os.getenv("DISCORD_TOKEN"),
+	selfbot = true,
+	autoRuntime = true,
+	autoLoop = true,
+})
+
+client:on("MESSAGE_CREATE", function(message)
+	if not message.isSelf then
+		return
+	end
+
+	if message.content == ".ping" then
+		message:reply("pong")
+	end
+end)
+```
+
 ## API shape
 
 You can stay high-level:
