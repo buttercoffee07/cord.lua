@@ -90,9 +90,8 @@ if not client.runtime or type(client.runtime.requestFn) ~= "function" then
 	fail("HTTP runtime adapter is missing. Check lua_modules install.")
 end
 
-local rest = client.rest
-if type(rest) ~= "table" or type(rest.request) ~= "function" then
-	fail("Client REST layer is missing.")
+if type(client.sendMessage) ~= "function" then
+	fail("Client message helper is missing.")
 end
 
 local success = 0
@@ -103,9 +102,7 @@ print(("[rapid-test] starting burst count=%d intervalMs=%d channel=%s"):format(t
 
 for i = 1, total do
 	local content = ("%s #%d at %s"):format(prefix, i, os.date("%H:%M:%S"))
-	local _, err = rest:request("POST", "/channels/" .. channelId .. "/messages", {
-		content = content,
-	})
+	local _, err = client:sendMessage(channelId, content)
 
 	if err then
 		failed = failed + 1

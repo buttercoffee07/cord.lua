@@ -8,12 +8,94 @@ local Message = require("src.structures.message")
 
 local Client = Class.extend()
 
+local function copyTable(input)
+	local out = {}
+	if type(input) ~= "table" then
+		return out
+	end
+
+	for key, value in pairs(input) do
+		out[key] = value
+	end
+
+	return out
+end
+
 local function parseDispatchData(client, eventName, data)
 	if eventName == "MESSAGE_CREATE" and type(data) == "table" then
 		return Message.new(client, data)
 	end
 
 	return data
+end
+
+local function callRest(self, name, ...)
+	local rest = self.rest
+	if type(rest) ~= "table" then
+		return nil, "Rest client is missing."
+	end
+
+	local method = rest[name]
+	if type(method) ~= "function" then
+		return nil, "Rest method is missing: " .. tostring(name)
+	end
+
+	return method(rest, ...)
+end
+
+local function toMessage(self, data)
+	if type(data) ~= "table" then
+		return nil
+	end
+
+	return Message.new(self, data)
+end
+
+local function toMessageList(self, data)
+	if type(data) ~= "table" then
+		return {}
+	end
+
+	local out = {}
+	for i = 1, #data do
+		out[i] = Message.new(self, data[i])
+	end
+
+	return out
+end
+
+local function toReplyReference(channelId, messageId)
+	if type(channelId) == "table" then
+		local message = channelId
+		return {
+			message_id = message.id,
+			channel_id = message.channelId,
+			guild_id = message.guildId or (type(message.raw) == "table" and message.raw.guild_id) or nil,
+		}
+	end
+
+	if messageId == nil then
+		return nil
+	end
+
+	return {
+		message_id = tostring(messageId),
+		channel_id = tostring(channelId),
+	}
+end
+
+local function toMessageBody(contentOrBody)
+	if type(contentOrBody) == "table" then
+		return copyTable(contentOrBody)
+	end
+
+	if contentOrBody == nil then
+		return {}
+	end
+
+	return {
+		content = tostring(contentOrBody),
+	}
 end
 
 function Client:init(opts)
@@ -226,6 +308,140 @@ function Client:destroy(reason)
 	self._gatewayDispatchHandler = nil
 	self._gatewayErrorHandler = nil
 	return true
+end
+
+function Client:request(method, route, body)
+	return callRest(self, "request", method, route, body)
+end
+
+function Client:get(route, query)
+	return callRest(self, "get", route, query)
+end
+
+function Client:post(route, body, query)
+	return callRest(self, "post", route, body, query)
+end
+
+function Client:put(route, body, query)
+	return callRest(self, "put", route, body, query)
+end
+
+function Client:patch(route, body, query)
+	return callRest(self, "patch", route, body, query)
+end
+
+function Client:delete(route, query)
+	return callRest(self, "delete", route, query)
+end
+
+function Client:fetchSelf()
+	return callRest(self, "getCurrentUser")
+end
+
+function Client:fetchUser(userId)
+	return callRest(self, "getUser", userId)
+end
+
+function Client:createDM(recipientId)
+	return callRest(self, "createDm", recipientId)
+end
+
+Client.createDm = Client.createDM
+
+function Client:fetchChannel(channelId)
+	return callRest(self, "getChannel", channelId)
+end
+
+function Client:fetchGuild(guildId)
+	return callRest(self, "getGuild", guildId)
+end
+
+function Client:fetchGuildChannels(guildId)
+	return callRest(self, "getGuildChannels", guildId)
+end
+
+function Client:fetchMessage(channelId, messageId)
+	local res, err = callRest(self, "getChannelMessage", channelId, messageId)
+	if not res then
+		return nil, err
+	end
+
+	return toMessage(self, res.data), nil, res
+end
+
+function Client:fetchMessages(channelId, query)
+	local res, err = callRest(self, "getChannelMessages", channelId, query)
+	if not res then
+		return nil, err
+	end
+
+	return toMessageList(self, res.data), nil, res
+end
+
+function Client:sendMessage(channelId, contentOrBody)
+	local res, err = callRest(self, "createMessage", channelId, contentOrBody)
+	if not res then
+		return nil, err
+	end
+
+	return toMessage(self, res.data), nil, res
+end
+
+function Client:reply(channelId, messageId, contentOrBody)
+	local reference = toReplyReference(channelId, messageId)
+	if not reference or type(reference.message_id) ~= "string" or reference.message_id == "" then
+		return nil, "Reply target is missing."
+	end
+
+	local targetChannelId = reference.channel_id
+	if type(targetChannelId) ~= "string" or targetChannelId == "" then
+		return nil, "Reply channel is missing."
+	end
+
+	local body = toMessageBody(contentOrBody)
+	body.message_reference = body.message_reference or reference
+	return self:sendMessage(targetChannelId, body)
+end
+
+function Client:replyToMessage(message, contentOrBody)
+	return self:reply(message, nil, contentOrBody)
+end
+
+function Client:editMessage(channelId, messageId, contentOrBody)
+	local res, err = callRest(self, "editMessage", channelId, messageId, contentOrBody)
+	if not res then
+		return nil, err
+	end
+
+	return toMessage(self, res.data), nil, res
+end
+
+function Client:deleteMessage(channelId, messageId)
+	return callRest(self, "deleteMessage", channelId, messageId)
+end
+
+function Client:bulkDeleteMessages(channelId, messageIds)
+	return callRest(self, "bulkDeleteMessages", channelId, messageIds)
+end
+
+function Client:triggerTyping(channelId)
+	return callRest(self, "triggerTyping", channelId)
+end
+
+function Client:addReaction(channelId, messageId, emoji)
+	return callRest(self, "addReaction", channelId, messageId, emoji)
+end
+
+function Client:removeOwnReaction(channelId, messageId, emoji)
+	return callRest(self, "removeOwnReaction", channelId, messageId, emoji)
+end
+
+function Client:pinMessage(channelId, messageId)
+	return callRest(self, "pinMessage", channelId, messageId)
+end
+
+function Client:unpinMessage(channelId, messageId)
+	return callRest(self, "unpinMessage", channelId, messageId)
 end
 
 return Client

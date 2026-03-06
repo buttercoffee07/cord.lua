@@ -2,12 +2,32 @@ local BaseStructure = require("src.structures.base_structure")
 
 local Message = BaseStructure.extend()
 
-local function copyTable(input)
-	local out = {}
-	for key, value in pairs(input) do
-		out[key] = value
+local function getClientMethod(self, name)
+	local client = self.client
+	if type(client) ~= "table" then
+		return nil, nil, "Message client is missing."
 	end
-	return out
+
+	local method = client[name]
+	if type(method) ~= "function" then
+		return nil, nil, "Message client is missing."
+	end
+
+	return method, client
+end
+
+local function getIds(self)
+	local channelId = self.channelId
+	if type(channelId) ~= "string" or channelId == "" then
+		return nil, nil, "Message channel is missing."
+	end
+
+	local messageId = self.id
+	if type(messageId) ~= "string" or messageId == "" then
+		return nil, nil, "Message id is missing."
+	end
+
+	return channelId, messageId
 end
 
 function Message:patch(data)
@@ -18,6 +38,7 @@ function Message:patch(data)
 		self.content = ""
 		self.author = nil
 		self.channelId = nil
+		self.guildId = nil
 		return self
 	end
 
@@ -25,50 +46,130 @@ function Message:patch(data)
 	self.content = data.content or ""
 	self.author = data.author
 	self.channelId = data.channel_id and tostring(data.channel_id) or nil
+	self.guildId = data.guild_id and tostring(data.guild_id) or nil
 	return self
 end
 
+function Message:toReference()
+	if type(self.id) ~= "string" or self.id == "" then
+		return nil
+	end
+
+	local ref = {
+		message_id = self.id,
+	}
+
+	if type(self.channelId) == "string" and self.channelId ~= "" then
+		ref.channel_id = self.channelId
+	end
+
+	if type(self.guildId) == "string" and self.guildId ~= "" then
+		ref.guild_id = self.guildId
+	end
+
+	return ref
+end
+
 function Message:reply(contentOrBody)
-	if type(self.channelId) ~= "string" or self.channelId == "" then
-		return nil, "Message channel is missing."
+	local method, client, err = getClientMethod(self, "replyToMessage")
+	if not method then
+		return nil, err
 	end
 
-	local client = self.client
-	if type(client) ~= "table" then
-		return nil, "Message client is missing."
+	return method(client, self, contentOrBody)
+end
+
+function Message:edit(contentOrBody)
+	local channelId, messageId, idErr = getIds(self)
+	if not channelId then
+		return nil, idErr
 	end
 
-	local rest = client.rest
-	if type(rest) ~= "table" or type(rest.request) ~= "function" then
-		return nil, "Rest client is missing."
+	local method, client, methodErr = getClientMethod(self, "editMessage")
+	if not method then
+		return nil, methodErr
 	end
 
-	local body
-	if type(contentOrBody) == "table" then
-		body = copyTable(contentOrBody)
-	elseif contentOrBody == nil then
-		body = {}
-	else
-		body = {
-			content = tostring(contentOrBody),
-		}
+	local updated, err, res = method(client, channelId, messageId, contentOrBody)
+	if not updated then
+		return nil, err
 	end
 
-	if body.message_reference == nil and type(self.id) == "string" and self.id ~= "" then
-		local ref = {
-			message_id = self.id,
-			channel_id = self.channelId,
-		}
-
-		local raw = self.raw
-		if type(raw) == "table" and type(raw.guild_id) == "string" and raw.guild_id ~= "" then
-			ref.guild_id = raw.guild_id
-		end
-
-		body.message_reference = ref
+	if type(updated.raw) == "table" then
+		self:patch(updated.raw)
 	end
 
-	return rest:request("POST", "/channels/" .. self.channelId .. "/messages", body)
+	return self, nil, res
+end
+
+function Message:delete()
+	local channelId, messageId, idErr = getIds(self)
+	if not channelId then
+		return nil, idErr
+	end
+
+	local method, client, methodErr = getClientMethod(self, "deleteMessage")
+	if not method then
+		return nil, methodErr
+	end
+
+	return method(client, channelId, messageId)
+end
+
+function Message:react(emoji)
+	local channelId, messageId, idErr = getIds(self)
+	if not channelId then
+		return nil, idErr
+	end
+
+	local method, client, methodErr = getClientMethod(self, "addReaction")
+	if not method then
+		return nil, methodErr
+	end
+
+	return method(client, channelId, messageId, emoji)
+end
+
+function Message:unreact(emoji)
+	local channelId, messageId, idErr = getIds(self)
+	if not channelId then
+		return nil, idErr
+	end
+
+	local method, client, methodErr = getClientMethod(self, "removeOwnReaction")
+	if not method then
+		return nil, methodErr
+	end
+
+	return method(client, channelId, messageId, emoji)
+end
+
+function Message:pin()
+	local channelId, messageId, idErr = getIds(self)
+	if not channelId then
+		return nil, idErr
+	end
+
+	local method, client, methodErr = getClientMethod(self, "pinMessage")
+	if not method then
+		return nil, methodErr
+	end
+
+	return method(client, channelId, messageId)
+end
+
+function Message:unpin()
+	local channelId, messageId, idErr = getIds(self)
+	if not channelId then
+		return nil, idErr
+	end
+
+	local method, client, methodErr = getClientMethod(self, "unpinMessage")
+	if not method then
+		return nil, methodErr
+	end
+
+	return method(client, channelId, messageId)
 end
 
 return Message
