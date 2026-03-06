@@ -1,4 +1,5 @@
 local Class = require("src.core.class")
+local Serialize = require("src.core.serialize")
 
 local Logger = Class.extend()
 
@@ -10,25 +11,6 @@ local LEVEL_ORDER = {
 }
 
 local DEFAULT_LEVEL = "info"
-
-local function loadJsonAdapter()
-	local ok, cjson = pcall(require, "cjson")
-	if ok and cjson and cjson.encode then
-		return cjson
-	end
-
-	local okSafe, cjsonSafe = pcall(require, "cjson.safe")
-	if okSafe and cjsonSafe and cjsonSafe.encode then
-		return cjsonSafe
-	end
-
-	local okDk, dkjson = pcall(require, "dkjson")
-	if okDk and dkjson and dkjson.encode then
-		return dkjson
-	end
-
-	return nil
-end
 
 local function normalizeLevel(level)
 	if type(level) ~= "string" then
@@ -43,24 +25,21 @@ local function normalizeLevel(level)
 	return level
 end
 
-local function toText(json, value)
+local function toText(value)
 	local kind = type(value)
 	if kind == "string" then
 		return value
 	end
 
-	if kind == "number" or kind == "boolean" then
+	if kind == "number" or kind == "boolean" or kind == "nil" then
 		return tostring(value)
 	end
 
-	if kind == "table" and json and type(json.encode) == "function" then
-		local ok, encoded = pcall(json.encode, value)
-		if ok and type(encoded) == "string" then
-			return encoded
-		end
+	if kind == "table" then
+		return Serialize.value(value)
 	end
 
-	return tostring(value)
+	return Serialize.value(value)
 end
 
 function Logger:init(opts)
@@ -70,7 +49,6 @@ function Logger:init(opts)
 	self.level = normalizeLevel(opts.level)
 	self.tag = opts.tag or "cord"
 	self.writer = opts.writer or print
-	self.json = opts.json or loadJsonAdapter()
 end
 
 function Logger:setEnabled(enabled)
@@ -108,7 +86,7 @@ function Logger:log(level, event, data)
 	end
 
 	if data ~= nil then
-		parts[#parts + 1] = toText(self.json, data)
+		parts[#parts + 1] = toText(data)
 	end
 
 	self.writer(table.concat(parts, " "))
