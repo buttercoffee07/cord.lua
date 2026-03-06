@@ -11,12 +11,28 @@ end
 
 local function makeRequestFn(https, ltn12)
 	return function(req)
+		local headers = {}
+		if type(req.headers) == "table" then
+			for name, value in pairs(req.headers) do
+				headers[name] = value
+			end
+		end
+
+		local body = req.body
+		if type(body) == "string" then
+			if headers["Content-Length"] == nil and headers["content-length"] == nil then
+				headers["Content-Length"] = tostring(#body)
+			end
+		else
+			body = nil
+		end
+
 		local bodyChunks = {}
 		local ok, statusCode, headers, statusLine = https.request({
 			url = req.url,
 			method = req.method,
-			headers = req.headers,
-			source = req.body and ltn12.source.string(req.body) or nil,
+			headers = headers,
+			source = body and ltn12.source.string(body) or nil,
 			sink = ltn12.sink.table(bodyChunks),
 			protocol = "tlsv1_2",
 		})

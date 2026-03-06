@@ -27,15 +27,26 @@ local function fail(message)
 	os.exit(1)
 end
 
-local token = trim(os.getenv("DISCORD_BOT_TOKEN"))
+local function loadLocalConfig()
+	local ok, mod = pcall(require, "scripts.stress.local_config")
+	if not ok or type(mod) ~= "table" then
+		return {}
+	end
+
+	return mod
+end
+
+local cfg = loadLocalConfig()
+
+local token = trim(os.getenv("DISCORD_BOT_TOKEN")) or trim(cfg.DISCORD_BOT_TOKEN)
 if not token then
 	fail("Missing DISCORD_BOT_TOKEN.")
 end
 
-local intents = toInteger(os.getenv("DISCORD_INTENTS"), 513)
-local cycles = toInteger(os.getenv("FORCE_RECONNECT_CYCLES"), 3)
-local intervalMs = toInteger(os.getenv("FORCE_RECONNECT_INTERVAL_MS"), 5000)
-local settleMs = toInteger(os.getenv("FORCE_RECONNECT_SETTLE_MS"), 8000)
+local intents = toInteger(os.getenv("DISCORD_INTENTS"), cfg.DISCORD_INTENTS or 513)
+local cycles = toInteger(os.getenv("FORCE_RECONNECT_CYCLES"), cfg.FORCE_RECONNECT_CYCLES or 3)
+local intervalMs = toInteger(os.getenv("FORCE_RECONNECT_INTERVAL_MS"), cfg.FORCE_RECONNECT_INTERVAL_MS or 5000)
+local settleMs = toInteger(os.getenv("FORCE_RECONNECT_SETTLE_MS"), cfg.FORCE_RECONNECT_SETTLE_MS or 8000)
 
 if cycles <= 0 then
 	fail("FORCE_RECONNECT_CYCLES must be > 0.")

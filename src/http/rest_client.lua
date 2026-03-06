@@ -93,7 +93,11 @@ function RestClient:init(opts)
 	opts = opts or {}
 
 	self.token = opts.token
-	self.rateLimiter = opts.rateLimiter or RateLimiter.new()
+	self.rateLimiter = opts.rateLimiter
+		or RateLimiter.new({
+			sleep = opts.sleep,
+			now = opts.now,
+		})
 	self.baseUrl = opts.baseUrl or DEFAULT_BASE_URL
 	self.requestFn = opts.requestFn
 	self.json = opts.json or loadJsonAdapter()

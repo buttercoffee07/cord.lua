@@ -4,3 +4,4 @@
 /.luarocks
 /todo.md
 /test_bots
+/scripts/stress/local_config.lua

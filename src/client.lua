@@ -46,6 +46,7 @@ function Client:init(opts)
 
 	self.loopFn = opts.loopFn or opts.loop or runtime.loop
 	self.exitLoopFn = opts.exitLoopFn or opts.exitLoop or runtime.exit
+	self._loopActive = false
 
 	self.rest = opts.rest
 		or RestClient.new({
@@ -53,6 +54,7 @@ function Client:init(opts)
 			rateLimiter = opts.rateLimiter,
 			baseUrl = opts.baseUrl,
 			requestFn = requestFn,
+			sleep = sleep,
 			json = opts.restJson or opts.json,
 		})
 
@@ -155,12 +157,14 @@ function Client:runWithLoop(url)
 	local runErr = nil
 	local exitLoopFn = self.exitLoopFn
 
+	self._loopActive = true
+
 	spawn(function()
 		local ok, err = self:run(url)
 		if not ok then
 			runErr = err
 			if type(exitLoopFn) == "function" then
-				exitLoopFn()
+				pcall(exitLoopFn)
 			end
 			return
 		end
@@ -168,7 +172,12 @@ function Client:runWithLoop(url)
 		started = true
 	end)
 
-	loopFn()
+	local okLoop, loopErr = pcall(loopFn)
+	self._loopActive = false
+
+	if not okLoop then
+		return nil, loopErr
+	end
 
 	if started then
 		return true
@@ -194,8 +203,8 @@ function Client:shutdown(reason)
 	end
 
 	local exitLoopFn = self.exitLoopFn
-	if type(exitLoopFn) == "function" then
-		exitLoopFn()
+	if self._loopActive and type(exitLoopFn) == "function" then
+		pcall(exitLoopFn)
 	end
 
 	if type(self.logger) == "table" and type(self.logger.info) == "function" then
