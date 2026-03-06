@@ -154,6 +154,10 @@ function Defaults.load()
 		runtime.loop = function(...)
 			return copas.loop(...)
 		end
+
+		runtime.exit = function(...)
+			return copas.exit(...)
+		end
 	end
 
 	local https = loadModule("ssl.https")

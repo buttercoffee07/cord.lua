@@ -45,6 +45,7 @@ function Client:init(opts)
 	local sleep = opts.sleep or runtime.sleep
 
 	self.loopFn = opts.loopFn or opts.loop or runtime.loop
+	self.exitLoopFn = opts.exitLoopFn or opts.exitLoop or runtime.exit
 
 	self.rest = opts.rest
 		or RestClient.new({
@@ -81,9 +82,10 @@ function Client:init(opts)
 		self.gateway:on("dispatch", self._gatewayDispatchHandler)
 
 		if type(self.logger) == "table" and type(self.logger.warn) == "function" then
-			self.gateway:on("error", function(err)
+			self._gatewayErrorHandler = function(err)
 				self.logger:warn("gateway.error", err)
-			end)
+			end
+			self.gateway:on("error", self._gatewayErrorHandler)
 		end
 	end
 end
@@ -151,11 +153,15 @@ function Client:runWithLoop(url)
 
 	local started = false
 	local runErr = nil
+	local exitLoopFn = self.exitLoopFn
 
 	spawn(function()
 		local ok, err = self:run(url)
 		if not ok then
 			runErr = err
+			if type(exitLoopFn) == "function" then
+				exitLoopFn()
+			end
 			return
 		end
 
@@ -169,6 +175,48 @@ function Client:runWithLoop(url)
 	end
 
 	return nil, runErr or "Loop stopped before client started."
+end
+
+function Client:shutdown(reason)
+	local gateway = self.gateway
+	if type(gateway) == "table" and type(gateway.off) == "function" then
+		if self._gatewayDispatchHandler then
+			gateway:off("dispatch", self._gatewayDispatchHandler)
+		end
+
+		if self._gatewayErrorHandler then
+			gateway:off("error", self._gatewayErrorHandler)
+		end
+	end
+
+	if type(gateway) == "table" and type(gateway.shutdown) == "function" then
+		gateway:shutdown(reason or "client_shutdown")
+	end
+
+	local exitLoopFn = self.exitLoopFn
+	if type(exitLoopFn) == "function" then
+		exitLoopFn()
+	end
+
+	if type(self.logger) == "table" and type(self.logger.info) == "function" then
+		self.logger:info("client.shutdown", reason or "client_shutdown")
+	end
+
+	self:emit("shutdown", reason)
+	return true
+end
+
+function Client:destroy(reason)
+	self:shutdown(reason or "client_destroy")
+
+	local events = self.events
+	if type(events) == "table" and type(events.off) == "function" then
+		events:off()
+	end
+
+	self._gatewayDispatchHandler = nil
+	self._gatewayErrorHandler = nil
+	return true
 end
 
 return Client

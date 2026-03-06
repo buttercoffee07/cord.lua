@@ -106,6 +106,7 @@ function Gateway:init(opts)
 	self.heartbeatInterval = nil
 	self.heartbeatRunning = false
 	self.heartbeatThread = nil
+	self.shuttingDown = false
 	self.reconnectRunning = false
 	self.reconnectAttempts = 0
 	self.reconnectBaseDelay = opts.reconnectBaseDelay or DEFAULT_RECONNECT_BASE
@@ -319,6 +320,10 @@ end
 function Gateway:scheduleReconnect(opts)
 	opts = opts or {}
 
+	if self.shuttingDown then
+		return nil, "Gateway is shutting down."
+	end
+
 	if self.reconnectRunning then
 		return true
 	end
@@ -388,6 +393,39 @@ function Gateway:scheduleReconnect(opts)
 	end
 
 	spawn(attempt)
+	return true
+end
+
+function Gateway:shutdown(reason)
+	if self.shuttingDown then
+		return true
+	end
+
+	self.shuttingDown = true
+	self.reconnectRunning = false
+	self:stopHeartbeatLoop()
+	self.connected = false
+
+	local socket = self.socket
+	self.socket = nil
+
+	if type(socket) == "table" then
+		local close = socket.close or socket.Close
+		if type(close) == "function" then
+			pcall(close, socket)
+		end
+	end
+
+	self:emit("shutdown", reason)
+	return true
+end
+
+function Gateway:destroy(reason)
+	self:shutdown(reason or "destroy")
+	local events = self.events
+	if type(events) == "table" and type(events.off) == "function" then
+		events:off()
+	end
 	return true
 end
 
@@ -684,6 +722,8 @@ function Gateway:connect(url)
 		return nil, "WebSocket factory is missing."
 	end
 
+	self.shuttingDown = false
+
 	local targetUrl = url or self.gatewayUrl
 	if type(targetUrl) ~= "string" or targetUrl == "" then
 		return nil, "Gateway URL is required."
@@ -706,7 +746,7 @@ function Gateway:connect(url)
 		self.connected = false
 		self:emit("close", ...)
 
-		if self.autoReconnect and not self.reconnectRunning then
+		if self.autoReconnect and not self.reconnectRunning and not self.shuttingDown then
 			local okReconnect, reconnectErr = self:scheduleReconnect({
 				reason = "socket_close",
 				canResume = true,
