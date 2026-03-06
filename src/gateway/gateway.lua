@@ -17,6 +17,19 @@ local DEFAULT_RECONNECT_MAX = 30
 local INVALID_SESSION_MIN_WAIT = 1
 local INVALID_SESSION_MAX_WAIT = 5
 
+local function copyTable(input)
+	local out = {}
+	if type(input) ~= "table" then
+		return out
+	end
+
+	for key, value in pairs(input) do
+		out[key] = value
+	end
+
+	return out
+end
+
 local function loadJsonAdapter()
 	local ok, cjson = pcall(require, "cjson")
 	if ok and cjson and cjson.decode and cjson.encode then
@@ -88,6 +101,20 @@ local function defaultSleep(seconds)
 	return taskLib.wait(seconds)
 end
 
+local function closeSocketSafely(socket)
+	if type(socket) ~= "table" then
+		return false
+	end
+
+	local close = socket.close or socket.Close
+	if type(close) ~= "function" then
+		return false
+	end
+
+	pcall(close, socket)
+	return true
+end
+
 function Gateway:init(opts)
 	opts = opts or {}
 
@@ -113,6 +140,10 @@ function Gateway:init(opts)
 	self.reconnectMaxDelay = opts.reconnectMaxDelay or DEFAULT_RECONNECT_MAX
 	self.autoReconnect = opts.autoReconnect ~= false
 	self.random = opts.random or math.random
+	self._nextConnectionId = 0
+	self._activeConnectionId = nil
+	self.lastCloseInfo = nil
+	self.lastReconnectInfo = nil
 	self.identifyProperties = opts.identifyProperties
 		or {
 			os = "linux",
@@ -131,6 +162,50 @@ end
 
 function Gateway:emit(event, ...)
 	return self.events:emit(event, ...)
+end
+
+function Gateway:nextConnectionId()
+	self._nextConnectionId = self._nextConnectionId + 1
+	return self._nextConnectionId
+end
+
+function Gateway:getLastCloseInfo()
+	return copyTable(self.lastCloseInfo)
+end
+
+function Gateway:getLastReconnectInfo()
+	return copyTable(self.lastReconnectInfo)
+end
+
+function Gateway:makeCloseInfo(source, clean, code, reason, extra)
+	extra = extra or {}
+
+	local info = {
+		source = source or "unknown",
+		clean = clean,
+		code = code,
+		reason = reason,
+		url = self.gatewayUrl,
+		connected = self.connected == true,
+		shuttingDown = self.shuttingDown == true,
+		reconnectRunning = self.reconnectRunning == true,
+		reconnectAttempts = self.reconnectAttempts,
+		sessionId = self.sessionId,
+		sequence = self.sequence,
+		canResume = type(self.sessionId) == "string" and self.sessionId ~= "" and type(self.sequence) == "number",
+		connectionId = extra.connectionId,
+		activeConnectionId = self._activeConnectionId,
+		stale = extra.stale == true,
+	}
+
+	for key, value in pairs(extra) do
+		if info[key] == nil then
+			info[key] = value
+		end
+	end
+
+	self.lastCloseInfo = info
+	return info
 end
 
 function Gateway:decodeMessage(raw)
@@ -303,17 +378,17 @@ function Gateway:dropConnection(closeSocket)
 	self.connected = false
 
 	local socket = self.socket
+	local connectionId = self._activeConnectionId
 	self.socket = nil
+	self._activeConnectionId = nil
 	if not closeSocket or type(socket) ~= "table" then
 		return true
 	end
 
-	local close = socket.close or socket.Close
-	if type(close) ~= "function" then
-		return true
-	end
-
-	pcall(close, socket)
+	self:makeCloseInfo("drop_connection", nil, nil, nil, {
+		connectionId = connectionId,
+	})
+	closeSocketSafely(socket)
 	return true
 end
 
@@ -360,12 +435,16 @@ function Gateway:scheduleReconnect(opts)
 			delay = minDelay
 		end
 
-		self:emit("reconnect_attempt", {
+		local info = {
 			reason = reason,
 			attempt = self.reconnectAttempts,
 			delay = delay,
 			canResume = canResume,
-		})
+			lastClose = self:getLastCloseInfo(),
+		}
+		self.lastReconnectInfo = info
+
+		self:emit("reconnect_attempt", info)
 
 		if delay > 0 then
 			sleep(delay)
@@ -378,7 +457,7 @@ function Gateway:scheduleReconnect(opts)
 		local okConnect, connectErr = self:connect(self.gatewayUrl)
 		if okConnect then
 			self:resetReconnectBackoff()
-			self:emit("reconnect_success", reason)
+			self:emit("reconnect_success", reason, info)
 			return
 		end
 
@@ -693,8 +772,12 @@ function Gateway:handlePayload(payload)
 	end
 end
 
-function Gateway:attachMessageListener(socket)
+function Gateway:attachMessageListener(socket, connectionId)
 	local ok = bindSocketEvent(socket, "message", function(raw)
+		if connectionId ~= self._activeConnectionId then
+			return
+		end
+
 		local payload, err = self:decodeMessage(raw)
 		if not payload then
 			self:emit("error", {
@@ -722,6 +805,10 @@ function Gateway:connect(url)
 		return nil, "WebSocket factory is missing."
 	end
 
+	if type(self.socket) == "table" and not self.reconnectRunning then
+		return nil, "Gateway is already connected."
+	end
+
 	self.shuttingDown = false
 
 	local targetUrl = url or self.gatewayUrl
@@ -736,17 +823,40 @@ function Gateway:connect(url)
 		return nil, "Failed to connect to gateway."
 	end
 
-	local okMessage, messageErr = self:attachMessageListener(socket)
+	local connectionId = self:nextConnectionId()
+	self._activeConnectionId = connectionId
+	self.socket = socket
+	self.connected = false
+
+	local okMessage, messageErr = self:attachMessageListener(socket, connectionId)
 	if not okMessage then
+		if self._activeConnectionId == connectionId then
+			self.socket = nil
+			self._activeConnectionId = nil
+		end
+		closeSocketSafely(socket)
 		return nil, messageErr
 	end
 
 	bindSocketEvent(socket, "close", function(...)
-		self:stopHeartbeatLoop()
-		self.connected = false
-		self:emit("close", ...)
+		local clean, code, reason = ...
+		local stale = connectionId ~= self._activeConnectionId
+		local info = self:makeCloseInfo("socket_close", clean, code, reason, {
+			connectionId = connectionId,
+			stale = stale,
+		})
 
-		if self.autoReconnect and not self.reconnectRunning and not self.shuttingDown then
+		if not stale then
+			self:stopHeartbeatLoop()
+			self.connected = false
+			self.socket = nil
+			self._activeConnectionId = nil
+		end
+
+		self:emit("close", clean, code, reason, info)
+		self:emit("disconnect", info)
+
+		if not stale and self.autoReconnect and not self.reconnectRunning and not self.shuttingDown then
 			local okReconnect, reconnectErr = self:scheduleReconnect({
 				reason = "socket_close",
 				canResume = true,
@@ -762,16 +872,22 @@ function Gateway:connect(url)
 	end)
 
 	bindSocketEvent(socket, "error", function(...)
+		if connectionId ~= self._activeConnectionId then
+			return
+		end
+
 		self:emit("error", ...)
 	end)
 
 	bindSocketEvent(socket, "open", function(...)
+		if connectionId ~= self._activeConnectionId then
+			return
+		end
+
 		self.connected = true
 		self:emit("open", ...)
 	end)
 
-	self.socket = socket
-	self.connected = true
 	self:emit("connect", targetUrl)
 	return true
 end

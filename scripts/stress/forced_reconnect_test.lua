@@ -84,21 +84,34 @@ local started = false
 
 gateway:on("reconnect_attempt", function(info)
 	reconnectAttempts = reconnectAttempts + 1
-	print(("[reconnect-test] reconnect attempt #%d: %s"):format(reconnectAttempts, tostring(info and info.reason)))
+	print(("[reconnect-test] reconnect attempt #%d: %s delay=%s canResume=%s staleClose=%s"):format(
+		reconnectAttempts,
+		tostring(info and info.reason),
+		tostring(info and info.delay),
+		tostring(info and info.canResume),
+		tostring(info and info.lastClose and info.lastClose.stale)
+	))
 end)
 
-gateway:on("reconnect_success", function(reason)
+gateway:on("reconnect_success", function(reason, info)
 	reconnectSuccess = reconnectSuccess + 1
-	print(("[reconnect-test] reconnect success #%d: %s"):format(reconnectSuccess, tostring(reason)))
+	print(("[reconnect-test] reconnect success #%d: %s attempt=%s"):format(
+		reconnectSuccess,
+		tostring(reason),
+		tostring(info and info.attempt)
+	))
 end)
 
-gateway:on("close", function(clean, code, reason)
+gateway:on("close", function(clean, code, reason, info)
 	socketCloses = socketCloses + 1
-	print(("[reconnect-test] socket close #%d clean=%s code=%s reason=%s"):format(
+	print(("[reconnect-test] socket close #%d clean=%s code=%s reason=%s source=%s stale=%s conn=%s"):format(
 		socketCloses,
 		tostring(clean),
 		tostring(code),
-		tostring(reason)
+		tostring(reason),
+		tostring(info and info.source),
+		tostring(info and info.stale),
+		tostring(info and info.connectionId)
 	))
 end)
 
@@ -128,38 +141,57 @@ client:on("READY", function()
 		return
 	end
 
-	spawn(function()
-		local waitSeconds = intervalMs / 1000
-		for i = 1, cycles do
-			if waitSeconds > 0 then
-				sleep(waitSeconds)
+	print(("[reconnect-test] starting worker cycles=%d intervalMs=%d settleMs=%d"):format(cycles, intervalMs, settleMs))
+
+	local okSpawn, spawnErr = pcall(spawn, function()
+		local okWorker, workerErr = xpcall(function()
+			local waitSeconds = intervalMs / 1000
+			print(("[reconnect-test] worker online waitSeconds=%.3f"):format(waitSeconds))
+
+			for i = 1, cycles do
+				if waitSeconds > 0 then
+					print(("[reconnect-test] waiting %.3fs before close %d/%d"):format(waitSeconds, i, cycles))
+					sleep(waitSeconds)
+				end
+
+				local socket = gateway.socket
+				local close = type(socket) == "table" and (socket.close or socket.Close)
+				if type(close) ~= "function" then
+					print(("[reconnect-test] skip force-close #%d: socket is missing"):format(i))
+				else
+					forcedCloses = forcedCloses + 1
+					print(("[reconnect-test] forcing close %d/%d"):format(i, cycles))
+					pcall(close, socket)
+				end
 			end
 
-			local socket = gateway.socket
-			local close = type(socket) == "table" and (socket.close or socket.Close)
-			if type(close) ~= "function" then
-				print(("[reconnect-test] skip force-close #%d: socket is missing"):format(i))
-			else
-				forcedCloses = forcedCloses + 1
-				print(("[reconnect-test] forcing close %d/%d"):format(i, cycles))
-				pcall(close, socket)
+			if settleMs > 0 then
+				local settleSeconds = settleMs / 1000
+				print(("[reconnect-test] settling for %.3fs"):format(settleSeconds))
+				sleep(settleSeconds)
 			end
+
+			print(("[reconnect-test] done. forced=%d closes=%d attempts=%d success=%d ready=%d"):format(
+				forcedCloses,
+				socketCloses,
+				reconnectAttempts,
+				reconnectSuccess,
+				readySeen
+			))
+
+			client:shutdown("forced_reconnect_test_complete")
+		end, debug.traceback)
+
+		if not okWorker then
+			print(("[reconnect-test] worker crashed: %s"):format(tostring(workerErr)))
+			client:shutdown("forced_reconnect_test_worker_crash")
 		end
-
-		if settleMs > 0 then
-			sleep(settleMs / 1000)
-		end
-
-		print(("[reconnect-test] done. forced=%d closes=%d attempts=%d success=%d ready=%d"):format(
-			forcedCloses,
-			socketCloses,
-			reconnectAttempts,
-			reconnectSuccess,
-			readySeen
-		))
-
-		client:shutdown("forced_reconnect_test_complete")
 	end)
+
+	if not okSpawn then
+		print(("[reconnect-test] spawn failed: %s"):format(tostring(spawnErr)))
+		client:shutdown("forced_reconnect_test_spawn_failed")
+	end
 end)
 
 local ok, err = client:runWithLoop()
