@@ -10,7 +10,7 @@ local function getClientMethod(self, name)
 
 	local method = client[name]
 	if type(method) ~= "function" then
-		return nil, nil, "Message client is missing."
+		return nil, nil, "Message client method is missing: " .. tostring(name)
 	end
 
 	return method, client

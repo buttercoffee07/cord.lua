@@ -129,6 +129,8 @@ function Client:init(opts)
 	self.loopFn = opts.loopFn or opts.loop or runtime.loop
 	self.exitLoopFn = opts.exitLoopFn or opts.exitLoop or runtime.exit
 	self._loopActive = false
+	self._shutdown = false
+	self._destroyed = false
 
 	self.rest = opts.rest
 		or RestClient.new({
@@ -191,6 +193,13 @@ function Client:emit(event, ...)
 end
 
 function Client:run(url)
+	if self._destroyed then
+		if type(self.logger) == "table" and type(self.logger.error) == "function" then
+			self.logger:error("client.run_failed", "Client is destroyed.")
+		end
+		return nil, "Client is destroyed."
+	end
+
 	local gateway = self.gateway
 	if type(gateway) ~= "table" or type(gateway.connect) ~= "function" then
 		if type(self.logger) == "table" and type(self.logger.error) == "function" then
@@ -219,6 +228,13 @@ function Client:run(url)
 end
 
 function Client:runWithLoop(url)
+	if self._destroyed then
+		if type(self.logger) == "table" and type(self.logger.error) == "function" then
+			self.logger:error("client.loop_failed", "Client is destroyed.")
+		end
+		return nil, "Client is destroyed."
+	end
+
 	local loopFn = self.loopFn
 	if type(loopFn) ~= "function" then
 		if type(self.logger) == "table" and type(self.logger.error) == "function" then
@@ -269,6 +285,13 @@ function Client:runWithLoop(url)
 end
 
 function Client:shutdown(reason)
+	local finalReason = reason or "client_shutdown"
+	if self._shutdown then
+		return true
+	end
+
+	self._shutdown = true
+
 	local gateway = self.gateway
 	if type(gateway) == "table" and type(gateway.off) == "function" then
 		if self._gatewayDispatchHandler then
@@ -281,7 +304,7 @@ function Client:shutdown(reason)
 	end
 
 	if type(gateway) == "table" and type(gateway.shutdown) == "function" then
-		gateway:shutdown(reason or "client_shutdown")
+		gateway:shutdown(finalReason)
 	end
 
 	local exitLoopFn = self.exitLoopFn
@@ -290,14 +313,19 @@ function Client:shutdown(reason)
 	end
 
 	if type(self.logger) == "table" and type(self.logger.info) == "function" then
-		self.logger:info("client.shutdown", reason or "client_shutdown")
+		self.logger:info("client.shutdown", finalReason)
 	end
 
-	self:emit("shutdown", reason)
+	self:emit("shutdown", finalReason)
 	return true
 end
 
 function Client:destroy(reason)
+	if self._destroyed then
+		return true
+	end
+
+	self._destroyed = true
 	self:shutdown(reason or "client_destroy")
 
 	local events = self.events

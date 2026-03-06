@@ -291,7 +291,10 @@ function RestClient:request(method, route, body)
 
 	local requestFn = self.requestFn
 	if type(requestFn) ~= "function" then
-		return nil, makeError("missing_http_adapter", "HTTP adapter is missing.")
+		return nil, makeError("missing_http_adapter", "HTTP adapter is missing.", {
+			method = method:upper(),
+			route = route,
+		})
 	end
 
 	local methodUpper = method:upper()
@@ -311,13 +314,18 @@ function RestClient:request(method, route, body)
 		else
 			local json = self.json
 			if not json then
-				return nil, makeError("missing_json_encoder", "JSON encoder is missing.")
+				return nil, makeError("missing_json_encoder", "JSON encoder is missing.", {
+					method = methodUpper,
+					route = route,
+				})
 			end
 
 			local okEncode, encoded = pcall(json.encode, body)
 			if not okEncode or encoded == nil then
 				return nil, makeError("encode_failed", "Failed to encode request body.", {
 					cause = encoded,
+					method = methodUpper,
+					route = route,
 				})
 			end
 			payload = encoded
@@ -341,11 +349,16 @@ function RestClient:request(method, route, body)
 		if not okCall then
 			return nil, makeError("http_adapter_crash", "HTTP adapter crashed.", {
 				cause = res,
+				method = methodUpper,
+				route = route,
 			})
 		end
 
 		if type(res) ~= "table" then
-			return nil, makeError("invalid_response", "HTTP adapter returned invalid response.")
+			return nil, makeError("invalid_response", "HTTP adapter returned invalid response.", {
+				method = methodUpper,
+				route = route,
+			})
 		end
 
 		return res
