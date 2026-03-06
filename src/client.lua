@@ -1,10 +1,20 @@
 local Class = require("src.core.class")
 local EventEmitter = require("src.core.event_emitter")
+local Logger = require("src.core.logger")
 local RestClient = require("src.http.rest_client")
 local Gateway = require("src.gateway.gateway")
 local RuntimeDefaults = require("src.runtime.defaults")
+local Message = require("src.structures.message")
 
 local Client = Class.extend()
+
+local function parseDispatchData(client, eventName, data)
+	if eventName == "MESSAGE_CREATE" and type(data) == "table" then
+		return Message.new(client, data)
+	end
+
+	return data
+end
 
 function Client:init(opts)
 	opts = opts or {}
@@ -14,6 +24,14 @@ function Client:init(opts)
 	self.autoLoop = opts.autoLoop == true
 
 	self.events = opts.events or EventEmitter.new()
+	self.logger = opts.logger
+		or Logger.new({
+			enabled = opts.logEnabled == true or opts.debug == true,
+			level = opts.logLevel or "info",
+			tag = opts.logTag or "cord",
+			writer = opts.logWriter,
+			json = opts.logJson or opts.json,
+		})
 	self.runtime = opts.runtime
 
 	if not self.runtime and opts.autoRuntime ~= false then
@@ -54,12 +72,19 @@ function Client:init(opts)
 		})
 
 	self._gatewayDispatchHandler = function(eventName, data, payload)
-		self:emit("dispatch", eventName, data, payload)
-		self:emit(eventName, data, payload)
+		local parsed = parseDispatchData(self, eventName, data)
+		self:emit("dispatch", eventName, parsed, payload)
+		self:emit(eventName, parsed, payload)
 	end
 
 	if type(self.gateway) == "table" and type(self.gateway.on) == "function" then
 		self.gateway:on("dispatch", self._gatewayDispatchHandler)
+
+		if type(self.logger) == "table" and type(self.logger.warn) == "function" then
+			self.gateway:on("error", function(err)
+				self.logger:warn("gateway.error", err)
+			end)
+		end
 	end
 end
 
@@ -82,26 +107,45 @@ end
 function Client:run(url)
 	local gateway = self.gateway
 	if type(gateway) ~= "table" or type(gateway.connect) ~= "function" then
+		if type(self.logger) == "table" and type(self.logger.error) == "function" then
+			self.logger:error("client.run_failed", "Gateway is missing.")
+		end
 		return nil, "Gateway is missing."
 	end
 
 	local ok, err = gateway:connect(url)
 	if not ok then
+		if type(self.logger) == "table" and type(self.logger.error) == "function" then
+			self.logger:error("client.run_failed", err)
+		end
 		return nil, err
 	end
 
-	self:emit("run", url or gateway.gatewayUrl)
+	local targetUrl = url or gateway.gatewayUrl
+	if type(self.logger) == "table" and type(self.logger.info) == "function" then
+		self.logger:info("client.run", {
+			url = targetUrl,
+		})
+	end
+
+	self:emit("run", targetUrl)
 	return true
 end
 
 function Client:runWithLoop(url)
 	local loopFn = self.loopFn
 	if type(loopFn) ~= "function" then
+		if type(self.logger) == "table" and type(self.logger.error) == "function" then
+			self.logger:error("client.loop_missing", "Loop runner is missing.")
+		end
 		return nil, "Loop runner is missing."
 	end
 
 	local spawn = self.gateway and self.gateway.spawn
 	if type(spawn) ~= "function" then
+		if type(self.logger) == "table" and type(self.logger.error) == "function" then
+			self.logger:error("client.scheduler_missing", "Scheduler is missing.")
+		end
 		return nil, "Scheduler is missing."
 	end
 
